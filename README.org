@@ -134,33 +134,39 @@ rm -rf /usr/src/tbs5930-1.1
 * Verifying the stream
 
 Install =dvb-tools= (it provides =dvbv5-zap=) and create =channels.conf=.
-This example uses a Hotbird 13°E transponder:
+This example uses the free-to-air channel 4Fun.TV (Cyfrowy Polsat) on
+Hotbird 13°E, transponder 10757 V:
 
 #+begin_src conf
-[Canal_Polska]
-	SERVICE_ID = 4401
+[4Fun.TV]
+	SERVICE_ID = 17037
+	VIDEO_PID = 265
+	AUDIO_PID = 521
 	DELIVERY_SYSTEM = DVBS2
-	FREQUENCY = 10719000
+	FREQUENCY = 10757000
 	MODULATION = PSK/8
 	POLARIZATION = VERTICAL
 	SYMBOL_RATE = 27500000
 	INNER_FEC = 3/4
 	INVERSION = AUTO
-	ROLLOFF = 35
+	ROLLOFF = 20
 	STREAM_ID = 0
 #+end_src
 
-Record the full transport stream for 15 seconds. =-l EXTENDED= is a
-universal Ku-band LNB, =-S 0= is DiSEqC port 0, =-P= passes all PIDs:
+Record the full transport stream of the transponder for 15 seconds.
+=-l EXTENDED= is a universal Ku-band LNB, =-S 0= is DiSEqC port 0, =-P=
+passes all PIDs:
 
 #+begin_src sh
-dvbv5-zap -a 0 -l EXTENDED -S 0 -c channels.conf -P -t 15 -o /tmp/test.ts Canal_Polska
+dvbv5-zap -a 0 -l EXTENDED -S 0 -c channels.conf -P -t 15 -o /tmp/test.ts 4Fun.TV
 ls -l /tmp/test.ts                     # expect tens of MB
 dmesg | grep -E 'disconnect|EMI'       # expect nothing new
 #+end_src
 
-Without =-P= (and without =VIDEO_PID= / =AUDIO_PID= in the channel file),
-=dvbv5-zap -o= records 0 bytes. That does not indicate a driver problem.
+Without =-P=, only the channel's video and audio PIDs (=VIDEO_PID=,
+=AUDIO_PID=) are recorded, so the file is much smaller (a few MB).
+Broadcasters occasionally change PIDs. If the file stays empty, check the
+current ones with =dvbv5-scan= or in Tvheadend.
 
 * Fixes in this fork
 
