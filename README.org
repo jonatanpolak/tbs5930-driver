@@ -10,7 +10,186 @@ Produces two kernel modules:
 - =dvb-usb-tbs5930= — USB adapter driver (Cypress FX2 + TBS protocol)
 - =m88rs6060= — DVB-S/S2/S2X demodulator/tuner frontend
 
-Requires firmware: =dvb-usb-id5930.fw=
+Requires firmware: =dvb-usb-id5930.fw= and =dvb-demod-m88rs6060.fw=
+
+Tested on Proxmox VE 9 (Debian 13, kernel =7.0.14-19-pve=, Intel Cannon Lake
+xHCI) with Tvheadend 4.3 and Kodi: lock on Hotbird 13°E and continuous TS
+streaming without USB disconnects.
+
+* Fixes in this fork
+
+** Tuner disconnects as soon as streaming starts (=disabled by hub (EMI?)=)
+
+Symptom: tuning and lock work (=dvbv5-zap= shows =Lock (0x1f)=), but the
+moment an application reads the transport stream (Tvheadend, Kodi,
+=dvbv5-zap -r=/=-o=), the device drops off the bus and re-enumerates forever:
+
+#+begin_example
+usb usb1-port7: disabled by hub (EMI?), re-enabling...
+usb 1-7: USB disconnect, device number 32
+#+end_example
+
+It is not EMI. With =xhci_hcd= dynamic debug enabled, every bulk URB on EP
+0x82 fails immediately:
+
+#+begin_example
+xhci_hcd 0000:00:14.0: Babble error for slot 42 ep 4 on endpoint
+xhci_hcd 0000:00:14.0: Giveback URB ..., len = 0, expected = 4096, status = -75
+#+end_example
+
+Root cause is in the stock TBS FX2 firmware (=dvb-usb-id5930.fw=, MD5
+=34393fe6c7991e3a96dbfc1483f860f2=, identical to the one in TBS's
+=tbs-tuner-firmwares_v1.0.tar.bz2=):
+
+- =TD_Init= (0x04cf) configures EP2 as a bulk IN endpoint with
+  =EP2AUTOINLEN = 512=, matching the high-speed descriptor
+  (=wMaxPacketSize 0x0200=).
+- The =SET_CONFIGURATION= handler (0x0dad, reached from the standard request
+  dispatcher for =bRequest == 9=) overwrites it with *1024*
+  (=90 e6 20 74 04 f0=: =MOV DPTR,#EP2AUTOINLENH; MOV A,#04; MOVX @DPTR,A=).
+- The host always sends =SET_CONFIGURATION= during enumeration, so the FX2
+  then sends 1024-byte packets on a 512-byte high-speed bulk endpoint. xHCI
+  reports babble and the root hub disables the port.
+
+The driver now patches that immediate to =0x02= (512 bytes) in memory before
+uploading the firmware, and logs it:
+
+#+begin_example
+usb 1-7: patched firmware at 0x0db0: EP2AUTOINLEN 1024 -> 512
+#+end_example
+
+Your firmware file stays untouched. The same 512 → 1024 pattern is present in
+every FX2 firmware in the TBS firmware pack. Other TBS FX2 tuners may be
+affected the same way.
+
+** Firmware is (re)loaded even when the FX2 is already warm
+
+The FX2 keeps its firmware as long as the tuner has power, including across
+host reboots and module reloads. A tuner previously used with the TBS driver
+(or an older version of this driver) would keep running the unpatched
+firmware. The driver now always uploads the patched firmware. The FX2 core
+handles the =0xA0= load request itself, and a warm FX2 does not renumerate
+after the restart, so initialization continues without a USB reconnect.
+You do not need to unplug the tuner's power after upgrading.
+
+** Demodulator not detected after a warm restart
+
+=m88rs6060_probe()= expected register 0x00 to read exactly =0xe2=. After a
+host reboot or module reload without power-cycling the tuner, it reads =0xe3=
+(the chip ID is in bits [7:1], bit 0 is a status bit), so probe failed with
+=-ENODEV= and no frontend was registered. Only bits [7:1] are compared now.
+
+** DKMS packaging
+
+A =dkms.conf= is included, so the modules are rebuilt automatically on
+kernel updates (Debian, Ubuntu, Proxmox VE, ...).
+
+* Installation (DKMS)
+
+** 1. Build dependencies
+
+Debian / Ubuntu:
+
+#+begin_src sh
+apt install dkms build-essential linux-headers-$(uname -r)
+#+end_src
+
+Proxmox VE:
+
+#+begin_src sh
+apt install dkms build-essential proxmox-headers-$(uname -r)
+#+end_src
+
+** 2. Firmware
+
+Both files come from TBS's firmware pack:
+
+#+begin_src sh
+wget https://www.tbsdtv.com/download/document/linux/tbs-tuner-firmwares_v1.0.tar.bz2
+tar xjf tbs-tuner-firmwares_v1.0.tar.bz2 -C /tmp dvb-usb-id5930.fw dvb-demod-m88rs6060.fw
+cp /tmp/dvb-usb-id5930.fw /tmp/dvb-demod-m88rs6060.fw /lib/firmware/
+md5sum /lib/firmware/dvb-usb-id5930.fw /lib/firmware/dvb-demod-m88rs6060.fw
+# 34393fe6c7991e3a96dbfc1483f860f2  dvb-usb-id5930.fw
+# aeb4f1b2d7e6116815dc9c651aa310be  dvb-demod-m88rs6060.fw
+#+end_src
+
+** 3. Driver
+
+#+begin_src sh
+git clone https://github.com/jonatanpolak/tbs5930-driver.git
+cp -r tbs5930-driver /usr/src/tbs5930-1.1
+dkms install tbs5930/1.1
+#+end_src
+
+If an older DKMS version of this driver is installed, remove it first, for
+example =dkms remove tbs5930/1.0 --all=.
+
+** 4. Load
+
+Stop anything using the tuner (e.g. =systemctl stop tvheadend=), then:
+
+#+begin_src sh
+modprobe -r dvb_usb_tbs5930 m88rs6060
+modprobe dvb_usb_tbs5930
+dmesg | grep -E 'tbs5930|m88rs6060|TBS 5930|patched firmware'
+#+end_src
+
+You should see =patched firmware at 0x0db0= and =successfully initialized and
+connected=.
+
+* Verifying the stream
+
+Create a channel file (Hotbird 13°E example):
+
+#+begin_src conf
+[Canal_Polska]
+	DELIVERY_SYSTEM = DVBS2
+	FREQUENCY = 10719000
+	POLARIZATION = VERTICAL
+	SYMBOL_RATE = 27500000
+	INNER_FEC = 3/4
+	MODULATION = PSK/8
+	INVERSION = AUTO
+#+end_src
+
+Record the full transport stream (=-P= passes all PIDs) for 15 seconds:
+
+#+begin_src sh
+dvbv5-zap -a 0 -l EXTENDED -c channels.conf -P -t 15 -o /tmp/test.ts Canal_Polska
+ls -l /tmp/test.ts   # tens of MB, and no "USB disconnect" in dmesg
+#+end_src
+
+Without =-P= (and without =VIDEO_PID=/=AUDIO_PID= in the channel file)
+=dvbv5-zap -o= records nothing. That does not indicate a driver problem.
+
+* Troubleshooting
+
+- *Still =disabled by hub (EMI?)= when streaming:* check that =dmesg= shows
+  =patched firmware at 0x0db0=. If it does not, your =dvb-usb-id5930.fw=
+  differs from the TBS one. Please open an issue with its MD5. To see the
+  xHCI errors:
+
+  #+begin_src sh
+  echo 'module xhci_hcd +p' > /sys/kernel/debug/dynamic_debug/control
+  # reproduce, then:
+  echo 'module xhci_hcd -p' > /sys/kernel/debug/dynamic_debug/control
+  dmesg | grep -E 'Babble|status = -75'
+  #+end_src
+
+- *=Unknown device: chip_id 0x..=:* the demodulator did not answer with the
+  M88RS6060 ID. Check the tuner's 12 V power supply.
+
+* Known issues
+
+- *Kernel Oops if the tuner disappears while an application has the frontend
+  open.* Unplugging the tuner (or, before the fix above, the babble
+  disconnect loop) while e.g. =dvbv5-zap= holds =/dev/dvb/adapter0/frontend0=
+  can end in a NULL pointer dereference in =dvb_frontend_do_ioctl()= /
+  =dvb_frontend_release()=. The process stays stuck and the module cannot be
+  unloaded until reboot. This is the usual =dvb-usb-v2= + I2C demodulator
+  lifetime problem (=m88rs6060_remove()= frees the embedded =dvb_frontend=
+  exactly like in-tree drivers such as =m88ds3103=), not something specific
+  to this tuner. Stop Tvheadend before unplugging.
 
 * Origin & Modifications
 
@@ -28,6 +207,8 @@ significantly modified from the TBS original:
 - Adapted the m88rs6060 frontend for upstream kernel compatibility (missing FEC
   rate defines, removed dead code referencing TBS-only structs)
 - Packaged for out-of-tree Nix builds
+
+This fork adds the fixes described in [[*Fixes in this fork][Fixes in this fork]].
 
 * Building with Nix
 

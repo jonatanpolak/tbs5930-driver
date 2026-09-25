@@ -255,69 +255,102 @@ static int tbs5930_frontend_detach(struct dvb_usb_adapter *adap)
 
 static int tbs5930_identify_state(struct dvb_usb_device *d, const char **name)
 {
-	/* After firmware upload the FX2 reconnects with string descriptors.
-	 * Cold (no firmware): Mfr=0, Product=0
-	 * Warm (firmware loaded): Manufacturer="TBS-Tech", Product="TBS 5930"
+	/* Always (re)load the FX2 firmware, even when the device is warm
+	 * (Manufacturer="TBS-Tech" present): a warm FX2 may still be running
+	 * an unpatched image from the TBS driver or an older version of this
+	 * one, which breaks streaming (see tbs5930_fix_autoinlen()).  The FX2
+	 * core handles FX2_REQ_FIRMWARE_LOAD itself, so this works while the
+	 * old firmware is running.
 	 */
-	if (d->udev->manufacturer)
-		return WARM;
-
 	*name = TBS5930_FIRMWARE;
 	return COLD;
+}
+
+/* The stock TBS firmware's SET_CONFIGURATION handler sets EP2AUTOINLEN to
+ * 1024 bytes (MOV DPTR,#EP2AUTOINLENH; MOV A,#04; MOVX @DPTR,A), while
+ * TD_Init and the high-speed descriptor use 512.  The host always sends
+ * SET_CONFIGURATION during enumeration, so the FX2 then commits 1024-byte
+ * packets on a 512-byte high-speed bulk endpoint.  xHCI reports a babble
+ * error on EP 0x82 as soon as streaming starts and the hub disables the
+ * port ("disabled by hub (EMI?)"), which loops forever.  Patch the
+ * immediate to 0x02 (512 bytes).
+ */
+static void tbs5930_fix_autoinlen(struct dvb_usb_device *d, u8 *fw, size_t len)
+{
+	static const u8 pat[] = { 0x90, 0xe6, 0x20, 0x74, 0x04, 0xf0 };
+	size_t i;
+
+	for (i = 0; i + sizeof(pat) <= len; i++) {
+		if (memcmp(&fw[i], pat, sizeof(pat)))
+			continue;
+		fw[i + 4] = 0x02;
+		dev_info(&d->udev->dev,
+			 "patched firmware at 0x%04zx: EP2AUTOINLEN 1024 -> 512\n", i);
+	}
 }
 
 static int tbs5930_download_firmware(struct dvb_usb_device *d,
 				     const struct firmware *fw)
 {
+	/* A warm FX2 has already renumerated and will not do it again */
+	bool warm = d->udev->manufacturer;
 	int ret;
 	int i;
 	u8 reset;
+	u8 *data;
 
-	dev_info(&d->udev->dev, "downloading TBS5930 firmware\n");
+	data = kmemdup(fw->data, fw->size, GFP_KERNEL);
+	if (!data)
+		return -ENOMEM;
+	tbs5930_fix_autoinlen(d, data, fw->size);
+
+	dev_info(&d->udev->dev, "%s TBS5930 firmware\n",
+		 warm ? "reloading" : "downloading");
 
 	/* Stop the FX2 CPU */
 	reset = 1;
 	ret = tbs5930_op_rw(d->udev, FX2_REQ_FIRMWARE_LOAD, FX2_ADDR_CPUCS_ALT, 0,
 			    &reset, 1, TBS5930_WRITE_MSG);
 	if (ret < 0)
-		return ret;
+		goto out;
 
 	ret = tbs5930_op_rw(d->udev, FX2_REQ_FIRMWARE_LOAD, FX2_ADDR_CPUCS, 0,
 			    &reset, 1, TBS5930_WRITE_MSG);
 	if (ret < 0)
-		return ret;
+		goto out;
 
 	/* Upload firmware in 64-byte chunks.
 	 * tbs5930_op_rw already allocates a DMA-safe bounce buffer per
-	 * transfer, so we can pass fw->data directly without copying.
+	 * transfer.
 	 */
 	for (i = 0; i < fw->size; i += FX2_CHUNK_SIZE) {
 		int len = min_t(int, FX2_CHUNK_SIZE, fw->size - i);
 
 		if (tbs5930_op_rw(d->udev, FX2_REQ_FIRMWARE_LOAD, i, 0,
-				  (u8 *)&fw->data[i], len,
-				  TBS5930_WRITE_MSG) != len) {
+				  &data[i], len, TBS5930_WRITE_MSG) != len) {
 			dev_err(&d->udev->dev,
 				"error transferring firmware at offset %d\n", i);
-			return -EINVAL;
+			ret = -EINVAL;
+			goto out;
 		}
 	}
 
 	/* Restart the FX2 CPU */
 	reset = 0;
 	if (tbs5930_op_rw(d->udev, FX2_REQ_FIRMWARE_LOAD, FX2_ADDR_CPUCS_ALT, 0,
+			  &reset, 1, TBS5930_WRITE_MSG) != 1 ||
+	    tbs5930_op_rw(d->udev, FX2_REQ_FIRMWARE_LOAD, FX2_ADDR_CPUCS, 0,
 			  &reset, 1, TBS5930_WRITE_MSG) != 1) {
 		dev_err(&d->udev->dev, "could not restart USB controller CPU\n");
-		return -EINVAL;
-	}
-	if (tbs5930_op_rw(d->udev, FX2_REQ_FIRMWARE_LOAD, FX2_ADDR_CPUCS, 0,
-			  &reset, 1, TBS5930_WRITE_MSG) != 1) {
-		dev_err(&d->udev->dev, "could not restart USB controller CPU\n");
-		return -EINVAL;
+		ret = -EINVAL;
+		goto out;
 	}
 
 	msleep(100);
-	return RECONNECTS_USB;
+	ret = warm ? 0 : RECONNECTS_USB;
+out:
+	kfree(data);
+	return ret;
 }
 
 static struct dvb_usb_device_properties tbs5930_props = {

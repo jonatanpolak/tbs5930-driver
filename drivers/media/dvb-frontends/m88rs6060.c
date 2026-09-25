@@ -3363,12 +3363,13 @@ static int m88rs6060_probe(struct i2c_client *client)
 		ret = PTR_ERR(dev->regmap);
 		goto err_base_kfree;
 	}
-	/*check demod i2c */
+	/*check demod i2c (0x00: chip id is bits [7:1], so 0xe2 or 0xe3) */
 	ret = regmap_read(dev->regmap, 0x00, &tmp);
 	if (ret)
 		goto err_regmap_exit;	
-	if (tmp != 0xe2)
+	if ((tmp >> 1) != (0xe2 >> 1))
 	{
+		dev_err(&client->dev, "Unknown device: chip_id 0x%02x\n", tmp);
 		ret = -ENODEV;
 		goto err_regmap_exit;
 	}
