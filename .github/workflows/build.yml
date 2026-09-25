@@ -23,7 +23,7 @@ jobs:
       - uses: actions/checkout@v6
       - name: Install Proxmox VE 9 kernel headers
         run: |
-          apt-get update && apt-get install -y --no-install-recommends ca-certificates curl make gcc
+          apt-get update && apt-get install -y --no-install-recommends ca-certificates curl make gcc libelf1t64
           curl -fsSL https://enterprise.proxmox.com/debian/proxmox-archive-keyring-trixie.gpg \
             -o /usr/share/keyrings/proxmox-archive-keyring.gpg
           echo "136673be77aba35dcce385b28737689ad64fd785a797e57897589aed08db6e45  /usr/share/keyrings/proxmox-archive-keyring.gpg" | sha256sum -c
