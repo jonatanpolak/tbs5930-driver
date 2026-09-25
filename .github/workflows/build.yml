@@ -13,9 +13,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
-      - run: sudo apt-get update && sudo apt-get install -y linux-headers-$(uname -r)
+      # The runner's own -azure kernel has no DVB subsystem (no dvb_usbv2_*
+      # symbols to link against), so build against Ubuntu's generic kernel.
+      - run: sudo apt-get update && sudo apt-get install -y linux-headers-generic
       - run: >
-          make -C /lib/modules/$(uname -r)/build M=$PWD/drivers/media
+          make -C "$(ls -d /usr/src/linux-headers-*-generic | sort -V | tail -1)"
+          M=$PWD/drivers/media
           CONFIG_MEDIA_SUPPORT=m CONFIG_DVB_CORE=m CONFIG_DVB_NET=y
           CONFIG_DVB_USB_TBS5930=m CONFIG_DVB_M88RS6060=m
           KCFLAGS="-Wall -Wextra -Werror" modules
