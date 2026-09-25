@@ -1,0 +1,21 @@
+name: Build
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - run: sudo apt-get update && sudo apt-get install -y linux-headers-$(uname -r)
+      - run: >
+          make -C /lib/modules/$(uname -r)/build M=$PWD/drivers/media
+          CONFIG_MEDIA_SUPPORT=m CONFIG_DVB_CORE=m CONFIG_DVB_NET=y
+          CONFIG_DVB_USB_TBS5930=m CONFIG_DVB_M88RS6060=m
+          KCFLAGS="-Wall -Wextra -Werror" modules

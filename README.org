@@ -265,32 +265,6 @@ Adds =dkms.conf= (package =tbs5930=, version =1.1=).
   in-tree drivers such as =m88ds3103= do), not something specific to this
   tuner. Stop Tvheadend before unplugging.
 
-* NixOS
-
-The flake is built with [[https://github.com/sielicki/kmod-ci][kmod-ci]]. It provides the package, an overlay and a
-NixOS module:
-
-#+begin_src sh
-nix build          # builds the modules against linux_latest
-#+end_src
-
-#+begin_src nix
-# flake.nix of your system
-inputs.tbs5930.url = "github:jonatanpolak/tbs5930-driver";
-
-# configuration.nix
-{ inputs, ... }: {
-  imports = [ inputs.tbs5930.nixosModules.tbs5930 ];
-}
-#+end_src
-
-The flake does not ship the TBS firmware. Provide the two files from
-/Installation, step 2/ yourself, e.g. with a small derivation added to
-=hardware.firmware=.
-
-The DKMS changes above do not affect the Nix build. It uses the same
-sources under =drivers/media=.
-
 * History
 
 The code comes from the open-source [[https://github.com/tbsdtv/linux_media][TBS linux_media]] tree (driver by Davin
@@ -307,7 +281,8 @@ Zhang, TBS). Nick Sielicki's upstream port made these changes to it:
 - Stripped out unused TBS-proprietary code (SPI/EEPROM ops, custom structs)
 - Adapted the m88rs6060 frontend for upstream kernel compatibility (missing
   FEC rate defines, removed dead code referencing TBS-only structs)
-- Packaged for out-of-tree Nix builds
+- Packaged for out-of-tree Nix builds (removed in this fork, which uses
+  DKMS instead)
 
 This fork adds the changes listed in /Fixes in this fork/.
 
