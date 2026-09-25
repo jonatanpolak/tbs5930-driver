@@ -265,12 +265,6 @@ Adds =dkms.conf= (package =tbs5930=, version =1.1=).
   in-tree drivers such as =m88ds3103= do), not something specific to this
   tuner. Stop Tvheadend before unplugging.
 
-- *NixOS module loads a non-existent module name.* The generated
-  =nixosModules.tbs5930= adds =boot.kernelModules = [ "tbs5930" ]=, but the
-  modules are called =dvb_usb_tbs5930= and =m88rs6060=. The tuner is still
-  loaded automatically via its USB alias, but =systemd-modules-load= may log
-  an error at boot.
-
 * NixOS
 
 The flake is built with [[https://github.com/sielicki/kmod-ci][kmod-ci]]. It provides the package, an overlay and a
