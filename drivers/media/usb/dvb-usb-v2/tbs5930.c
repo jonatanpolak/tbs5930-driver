@@ -5,6 +5,7 @@
  * Copyright (c) 2017 Davin <smailedavin@hotmail.com>
  */
 
+#include <linux/pm_qos.h>
 #include "dvb_usb.h"
 #include "m88rs6060.h"
 
@@ -39,8 +40,20 @@
 
 DVB_DEFINE_MOD_OPT_ADAPTER_NR(adapter_nr);
 
+/* The FX2 EP2 FIFO holds only 2 KiB of TS once packets are 512 bytes
+ * (see tbs5930_fix_autoinlen()), about 270 us at 60 Mbit/s.  Deep CPU idle
+ * states (C3+ on Coffee Lake, 70..890 us exit latency) delay the xHCI long
+ * enough to overflow it, losing TS packets.  Cap CPU wakeup latency while
+ * streaming.
+ */
+static int cpu_latency_us = 20;
+module_param(cpu_latency_us, int, 0644);
+MODULE_PARM_DESC(cpu_latency_us,
+	"CPU wakeup latency limit in us while streaming, <0 disables (default 20)");
+
 struct tbs5930_state {
 	struct i2c_client *i2c_client_demod;
+	struct pm_qos_request qos;
 };
 
 static int tbs5930_op_rw(struct usb_device *dev, u8 request, u16 value,
@@ -216,6 +229,27 @@ static int tbs5930_power_ctrl(struct dvb_usb_device *d, int onoff)
 	return 0;
 }
 
+static int tbs5930_streaming_ctrl(struct dvb_frontend *fe, int onoff)
+{
+	struct tbs5930_state *st = d_to_priv(fe_to_d(fe));
+
+	if (onoff && cpu_latency_us >= 0 &&
+	    !cpu_latency_qos_request_active(&st->qos))
+		cpu_latency_qos_add_request(&st->qos, cpu_latency_us);
+	else if (!onoff && cpu_latency_qos_request_active(&st->qos))
+		cpu_latency_qos_remove_request(&st->qos);
+
+	return 0;
+}
+
+static void tbs5930_exit(struct dvb_usb_device *d)
+{
+	struct tbs5930_state *st = d_to_priv(d);
+
+	if (cpu_latency_qos_request_active(&st->qos))
+		cpu_latency_qos_remove_request(&st->qos);
+}
+
 static int tbs5930_frontend_attach(struct dvb_usb_adapter *adap)
 {
 	struct dvb_usb_device *d = adap_to_d(adap);
@@ -361,6 +395,8 @@ static struct dvb_usb_device_properties tbs5930_props = {
 
 	.i2c_algo = &tbs5930_i2c_algo,
 	.power_ctrl = tbs5930_power_ctrl,
+	.streaming_ctrl = tbs5930_streaming_ctrl,
+	.exit = tbs5930_exit,
 	.frontend_attach = tbs5930_frontend_attach,
 	.frontend_detach = tbs5930_frontend_detach,
 	.identify_state = tbs5930_identify_state,
